@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>LifeRoute - Smart Emergency Locator</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+
+<style>
+body{
+margin:0;
+font-family:Arial;
+background-color: #a3a7cb;
+}
+
+nav{
+background:#04305f;
+color:white;
+padding:15px;
+text-align:center;
+font-size:20px;
+}
+
+#map{
+height:60vh;
+}
+
+#hospitalList{
+padding:15px;
+}
+
+.hospital-card{
+background:#f5f5f5;
+padding:15px;
+margin:10px 0;
+border-radius:8px;
+cursor:pointer;
+transition:0.3s;
+}
+
+.hospital-card:hover{
+background:#ffe5e5;
+}
+
+button, select{
+background:#020f71;
+color:white;
+padding:10px 20px;
+border:none;
+cursor:pointer;
+margin:10px;
+}
+
+select{
+background:#8681d6;
+}
+
+/* SIDE PANEL */
+#hospitalDetails{
+position:fixed;
+top:0;
+right:-400px;
+width:350px;
+height:100%;
+background:white;
+box-shadow:-3px 0 8px rgba(0,0,0,0.3);
+padding:20px;
+transition:0.4s;
+overflow-y:auto;
+z-index:1000;
+}
+
+#hospitalDetails.active{
+right:0;
+}
+
+#hospitalDetails img{
+width:100%;
+border-radius:10px;
+margin-bottom:10px;
+}
+
+.status-yes{
+color:green;
+font-weight:bold;
+}
+
+.status-no{
+color:rgba(0, 55, 255, 0.326);
+font-weight:bold;
+}
+</style>
+</head>
+<body>
+
+<nav>LifeRoute - Smart Emergency Locator</nav>
+
+<select id="patientCondition">
+<option value="Labour">Labour Pains</option>
+<option value="Accident">Accident / Trauma</option>
+<option value="Heart">Heart Attack</option>
+<option value="Stroke">Brain Stroke</option>
+</select>
+
+<button onclick="getLocation()">Detect My Location</button>
+
+<div id="map"></div>
+<div id="hospitalList"></div>
+<div id="hospitalDetails"></div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+<script>
+
+let map;
+let userMarker;
+let routeLayer;
+let hospitalMarkers = [];
+let allHospitals = [];
+
+function getLocation(){
+if(navigator.geolocation){
+navigator.geolocation.getCurrentPosition(showPosition);
+}else{
+alert("Geolocation not supported");
+}
+}
+
+function showPosition(position){
+
+const lat = position.coords.latitude;
+const lng = position.coords.longitude;
+
+if(!map){
+map = L.map('map').setView([lat,lng], 14);
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+maxZoom: 19
+}).addTo(map);
+}
+
+if(userMarker){
+map.removeLayer(userMarker);
+}
+
+userMarker = L.marker([lat,lng]).addTo(map)
+.bindPopup("You are here")
+.openPopup();
+
+findHospitals(lat,lng);
+}
+
+function findHospitals(lat,lng){
+
+const radius = 5000;
+
+const query = `
+[out:json];
+(
+node["amenity"="hospital"](around:${radius},${lat},${lng});
+way["amenity"="hospital"](around:${radius},${lat},${lng});
+relation["amenity"="hospital"](around:${radius},${lat},${lng});
+);
+out center;
+`;
+
+fetch("https://overpass-api.de/api/interpreter", {
+method: "POST",
+body: query
+})
+.then(response => response.json())
+.then(data => processHospitals(data.elements, lat, lng));
+}
+
+function getDistance(lat1, lon1, lat2, lon2){
+const R = 6371;
+const dLat = (lat2-lat1) * Math.PI/180;
+const dLon = (lon2-lon1) * Math.PI/180;
+const a =
+Math.sin(dLat/2) * Math.sin(dLat/2) +
+Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) *
+Math.sin(dLon/2) * Math.sin(dLon/2);
+const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+return R * c;
+}
+
+function processHospitals(hospitals, userLat, userLng){
+
+hospitalMarkers.forEach(marker => map.removeLayer(marker));
+hospitalMarkers = [];
+allHospitals = [];
+
+hospitals.forEach(h => {
+
+const hLat = h.lat || h.center?.lat;
+const hLng = h.lon || h.center?.lon;
+
+if(hLat && hLng){
+
+const distance = getDistance(userLat,userLng,hLat,hLng);
+
+// Simulated facilities
+let facilityDatabase = {
+ICU: Math.random() > 0.3,
+Ventilator: Math.random() > 0.5,
+Oxygen: true,
+Cardiologist: Math.random() > 0.4,
+Neurologist: Math.random() > 0.5,
+Maternity: Math.random() > 0.4,
+TraumaCare: Math.random() > 0.5
+};
+
+allHospitals.push({
+name: h.tags?.name || "Unnamed Hospital",
+lat: hLat,
+lng: hLng,
+distance: distance,
+facilities: facilityDatabase
+});
+}
+});
+
+allHospitals.sort((a,b)=>a.distance-b.distance);
+
+if(allHospitals.length > 0){
+intelligentHospitalSelection(userLat,userLng);
+displayHospitalList();
+}
+}
+
+function intelligentHospitalSelection(userLat,userLng){
+
+let condition = document.getElementById("patientCondition").value;
+
+let conditionMapping = {
+Labour: ["Maternity", "ICU"],
+Accident: ["TraumaCare", "ICU", "Ventilator"],
+Heart: ["Cardiologist", "ICU", "Oxygen"],
+Stroke: ["Neurologist", "ICU", "Ventilator"]
+};
+
+let requiredFacilities = conditionMapping[condition];
+
+let suitableHospitals = allHospitals.filter(h =>
+requiredFacilities.every(f => h.facilities[f])
+);
+
+let selectedHospital;
+
+if(suitableHospitals.length > 0){
+selectedHospital = suitableHospitals[0];
+selectedHospital.warning = false;
+}else{
+selectedHospital = allHospitals[0];
+selectedHospital.warning = true;
+}
+
+showSelectedHospital(userLat,userLng,selectedHospital);
+}
+
+function showSelectedHospital(userLat,userLng,hospital){
+
+const marker = L.marker([hospital.lat,hospital.lng])
+.addTo(map)
+.bindPopup(`${hospital.name}<br>${hospital.distance.toFixed(2)} km`)
+.openPopup();
+
+hospitalMarkers.push(marker);
+
+drawRoute(userLat,userLng,hospital.lat,hospital.lng);
+showHospitalDetails(hospital);
+}
+
+function drawRoute(userLat,userLng,hLat,hLng){
+
+if(routeLayer){
+map.removeLayer(routeLayer);
+}
+
+fetch(`https://router.project-osrm.org/route/v1/driving/${userLng},${userLat};${hLng},${hLat}?overview=full&geometries=geojson`)
+.then(res=>res.json())
+.then(data=>{
+
+routeLayer = L.geoJSON(data.routes[0].geometry,{
+style:{color:"red",weight:5}
+}).addTo(map);
+
+map.fitBounds(routeLayer.getBounds());
+});
+}
+
+function displayHospitalList(){
+
+let listHTML = "";
+
+allHospitals.slice(0,5).forEach(h => {
+
+listHTML += `
+<div class="hospital-card" onclick="selectHospital(${h.lat},${h.lng})">
+<strong>${h.name}</strong><br>
+Distance: ${h.distance.toFixed(2)} km
+</div>
+`;
+});
+
+document.getElementById("hospitalList").innerHTML = listHTML;
+}
+
+function selectHospital(hLat,hLng){
+
+drawRoute(
+userMarker.getLatLng().lat,
+userMarker.getLatLng().lng,
+hLat,
+hLng
+);
+
+let hospital = allHospitals.find(h=>h.lat==hLat && h.lng==hLng);
+showHospitalDetails(hospital);
+}
+
+function showHospitalDetails(hospital){
+
+let condition = document.getElementById("patientCondition").value;
+
+let conditionMapping = {
+Labour: ["Maternity", "ICU"],
+Accident: ["TraumaCare", "ICU", "Ventilator"],
+Heart: ["Cardiologist", "ICU", "Oxygen"],
+Stroke: ["Neurologist", "ICU", "Ventilator"]
+};
+
+let requiredFacilities = conditionMapping[condition];
+
+let statusText = hospital.warning ?
+"<span class='status-no'>⚠ No fully equipped hospital nearby. Showing nearest available hospital.</span>"
+:
+"<span class='status-yes'>✔ Fully Equipped for this Emergency</span>";
+
+let html = `
+<h2>${hospital.name}</h2>
+
+
+<p><strong>Distance:</strong> ${hospital.distance.toFixed(2)} km</p>
+
+<h3>Emergency Condition</h3>
+<p><strong>${condition}</strong></p>
+<p>${statusText}</p>
+
+<hr>
+
+<h3>Required Facilities</h3>
+${requiredFacilities.map(f =>
+`<p>${f}: ${hospital.facilities[f] ? "✔" : "✖"}</p>`
+).join("")}
+
+<hr>
+
+<h3>All Facilities</h3>
+${Object.keys(hospital.facilities).map(f =>
+`<p>${f}: ${hospital.facilities[f] ? "✔" : "✖"}</p>`
+).join("")}
+
+<button onclick="closePanel()">Close</button>
+`;
+
+document.getElementById("hospitalDetails").innerHTML = html;
+document.getElementById("hospitalDetails").classList.add("active");
+}
+
+function closePanel(){
+document.getElementById("hospitalDetails").classList.remove("active");
+}
+
+</script>
+
+</body>
+</html>
